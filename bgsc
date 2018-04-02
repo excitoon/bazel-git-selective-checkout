@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import re
+import subprocess
+import urllib.parse
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('action', help='action (clone, checkout)')
+parser.add_argument('arg', help='argument')
+args = parser.parse_args()
+
+
+def update_paths(paths, branch):
+    with open('.git/info/sparse-checkout', 'w') as f:
+        f.write('\n'.join(paths) + '\n')
+    subprocess.run(['git', 'checkout', branch]).check_returncode()
+
+def clone(url, branch):
+    parts = urllib.parse.urlparse(url)
+    name = os.path.basename(parts.path)
+    os.mkdir(name)
+    os.chdir(name)
+    subprocess.run(['git', 'init'], shell=True).check_returncode()
+    subprocess.run(['git', 'config', 'core.sparseCheckout', 'true'], shell=True).check_returncode()
+    subprocess.run(['git', 'remote', 'add', '-f', 'origin', url], shell=True).check_returncode()
+    update_paths(['/WORKSPACE'], branch)
+
+def checkout(target, branch):
+    with open('.git/info/sparse-checkout', 'r') as f:
+        paths = set(f.read().split('\n')[:-1])
+    something_done = False
+    if not '/WORKSPACE' in paths:
+        paths.add('/WORKSPACE')
+        something_done = True
+    path = target[2:].split(':')[0]
+    if not os.path.isfile(os.path.join(path, 'BUILD')):
+        print('Adding /%s/' % (path))
+        paths.add('/%s/' % (path))
+        something_done = True
+    if something_done:
+        update_paths(paths, branch)
+    steps = 0
+
+    while True:
+        cmd = ['bazel', 'query', 'deps(%s)' % (target)]
+        print(' '.join(cmd))
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True)
+        steps += 1
+        if process.returncode == 0:
+            break
+        else:
+            nothing_done = True
+            for line in process.stderr.split('\n'):
+                match = re.search("Unable to load package for '//([^:']+):'", line) or re.search("no such package '([^']+)': BUILD file not found on package path and referenced", line)
+                if not match is None:
+                    path = '/%s/' % (match.group(1))
+                    if not path in paths:
+                        print('Adding', path)
+                        paths.add(path)
+                        nothing_done = False
+            if nothing_done:
+                print(process.stderr)
+                return
+            else:
+                update_paths(paths, branch)
+
+    print('Successfully checked out. Total steps: %d' % (steps))
+
+
+branch = 'master'
+
+if args.action == 'clone':
+    clone(args.arg, branch)
+elif args.action == 'checkout':
+    checkout(args.arg, branch)
+else:
+    assert False, "Something went wrong."
